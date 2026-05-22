@@ -1,0 +1,47 @@
+{
+  "name": "Easter-2048-Solver",
+  "version": "0.0.3",
+  "manifest_version": 3,
+  "description": "Making easter 2048 puzzle un-fun by solving it with Expectimax AI.",
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "interceptor.js",
+        "solver.js"
+      ],
+      "matches": [
+        "https://play2048.co/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_title": "Solve 2048!"
+  },
+  "permissions": [
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://play2048.co/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://play2048.co/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
