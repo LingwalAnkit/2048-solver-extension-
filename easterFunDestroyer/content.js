@@ -472,30 +472,121 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     return raw.map(v => ENC[v] ?? ENC[Math.pow(2, Math.round(Math.log2(v || 1)))] ?? 0);
   }
 
-  // ── Line transform lookup ──────────────────────────────────────────────
-  const LINE_CACHE = new Map();
+  // ── Precomputed Tables (nneonneo style) ──────────────────────────────────
+  const ROW_LEFT_TABLE = new Uint16Array(65536);
+  const HEUR_SCORE_TABLE = new Float32Array(65536);
+  const SCORE_TABLE = new Float32Array(65536);
 
-  function buildCache() {
-    console.log('%c📐 [2048] Building move cache...', 'color:#818cf8');
-    for (let i = 0; i < 0x10000; i++) {
-      const a=(i>>12)&0xF, b=(i>>8)&0xF, c=(i>>4)&0xF, d=i&0xF;
-      const line = [a,b,c,d];
-      mergeLeft(line);
-      if (line[0]!==a||line[1]!==b||line[2]!==c||line[3]!==d) LINE_CACHE.set(i,line);
+  function initTables() {
+    const SCORE_LOST_PENALTY = 200000.0;
+    const SCORE_MONOTONICITY_POWER = 4.0;
+    const SCORE_MONOTONICITY_WEIGHT = 47.0;
+    const SCORE_SUM_POWER = 3.5;
+    const SCORE_SUM_WEIGHT = 11.0;
+    const SCORE_MERGES_WEIGHT = 700.0;
+    const SCORE_EMPTY_WEIGHT = 270.0;
+
+    for (let row = 0; row < 65536; ++row) {
+      const line = [
+        row & 0xf,
+        (row >> 4) & 0xf,
+        (row >> 8) & 0xf,
+        (row >> 12) & 0xf
+      ];
+
+      // Score Table
+      let score = 0.0;
+      for (let i = 0; i < 4; ++i) {
+        const rank = line[i];
+        if (rank >= 2) {
+          score += (rank - 1) * (1 << rank);
+        }
+      }
+      SCORE_TABLE[row] = score;
+
+      // Heuristic Score Table
+      let sum = 0;
+      let empty = 0;
+      let merges = 0;
+      let prev = 0;
+      let counter = 0;
+
+      for (let i = 0; i < 4; ++i) {
+        const rank = line[i];
+        sum += Math.pow(rank, SCORE_SUM_POWER);
+        if (rank === 0) {
+          empty++;
+        } else {
+          if (prev === rank) {
+            counter++;
+          } else if (counter > 0) {
+            merges += 1 + counter;
+            counter = 0;
+          }
+          prev = rank;
+        }
+      }
+      if (counter > 0) {
+        merges += 1 + counter;
+      }
+
+      let monotonicity_left = 0;
+      let monotonicity_right = 0;
+      for (let i = 1; i < 4; ++i) {
+        if (line[i-1] > line[i]) {
+          monotonicity_left += Math.pow(line[i-1], SCORE_MONOTONICITY_POWER) - Math.pow(line[i], SCORE_MONOTONICITY_POWER);
+        } else {
+          monotonicity_right += Math.pow(line[i], SCORE_MONOTONICITY_POWER) - Math.pow(line[i-1], SCORE_MONOTONICITY_POWER);
+        }
+      }
+
+      HEUR_SCORE_TABLE[row] = SCORE_LOST_PENALTY +
+        SCORE_EMPTY_WEIGHT * empty +
+        SCORE_MERGES_WEIGHT * merges -
+        SCORE_MONOTONICITY_WEIGHT * Math.min(monotonicity_left, monotonicity_right) -
+        SCORE_SUM_WEIGHT * sum;
+
+      // execute a move to the left
+      for (let i = 0; i < 3; ++i) {
+        let j;
+        for (j = i + 1; j < 4; ++j) {
+          if (line[j] !== 0) break;
+        }
+        if (j === 4) break;
+
+        if (line[i] === 0) {
+          line[i] = line[j];
+          line[j] = 0;
+          i--;
+        } else if (line[i] === line[j]) {
+          if (line[i] !== 0xf) {
+            line[i]++;
+          }
+          line[j] = 0;
+        }
+      }
+
+      ROW_LEFT_TABLE[row] = line[0] | (line[1] << 4) | (line[2] << 8) | (line[3] << 12);
     }
-    console.log(`%c📐 [2048] Cache ready (${LINE_CACHE.size} entries)`, 'color:#818cf8');
   }
 
-  function mergeLeft(line) {
-    const merged = [false,false,false,false];
-    for (let i=1;i<4;i++) {
-      let pos=i;
-      while (line[pos]!==0 && pos>0) {
-        if (line[pos-1]===0) { line[pos-1]=line[pos]; line[pos]=0; pos--; continue; }
-        if (!merged[pos-1] && line[pos-1]===line[pos]) { line[pos-1]++; line[pos]=0; merged[pos-1]=true; }
-        break;
-      }
-    }
+  function scoreHeurBoard(board) {
+    return HEUR_SCORE_TABLE[board[0]  | (board[1]  << 4) | (board[2]  << 8) | (board[3]  << 12)] +
+           HEUR_SCORE_TABLE[board[4]  | (board[5]  << 4) | (board[6]  << 8) | (board[7]  << 12)] +
+           HEUR_SCORE_TABLE[board[8]  | (board[9]  << 4) | (board[10] << 8) | (board[11] << 12)] +
+           HEUR_SCORE_TABLE[board[12] | (board[13] << 4) | (board[14] << 8) | (board[15] << 12)] +
+           HEUR_SCORE_TABLE[board[0]  | (board[4]  << 4) | (board[8]  << 8) | (board[12] << 12)] +
+           HEUR_SCORE_TABLE[board[1]  | (board[5]  << 4) | (board[9]  << 8) | (board[13] << 12)] +
+           HEUR_SCORE_TABLE[board[2]  | (board[6]  << 4) | (board[10] << 8) | (board[14] << 12)] +
+           HEUR_SCORE_TABLE[board[3]  | (board[7]  << 4) | (board[11] << 8) | (board[15] << 12)];
+  }
+
+  function buildCache() {
+    console.log('%c📐 [2048] Initializing nneonneo precomputed tables...', 'color:#818cf8');
+    const startTime = performance.now();
+    initTables();
+    const elapsed = performance.now() - startTime;
+    console.log(`%c📐 [2048] Tables ready in ${elapsed.toFixed(2)}ms`, 'color:#818cf8');
   }
 
   const ORDER = {
@@ -506,230 +597,162 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
   };
 
   function applyMove(board, dir) {
-    const b = board.slice(); let changed = false;
-    for (const [i0,i1,i2,i3] of ORDER[dir]) {
-      const key = (b[i0]<<12)|(b[i1]<<8)|(b[i2]<<4)|b[i3];
-      const res = LINE_CACHE.get(key);
-      if (res) { b[i0]=res[0];b[i1]=res[1];b[i2]=res[2];b[i3]=res[3]; changed=true; }
+    let b = null;
+    let changed = false;
+    const order = ORDER[dir];
+    for (let i = 0; i < 4; i++) {
+      const [i0, i1, i2, i3] = order[i];
+      const key = board[i0] | (board[i1] << 4) | (board[i2] << 8) | (board[i3] << 12);
+      const resVal = ROW_LEFT_TABLE[key];
+      const r0 = resVal & 0xf;
+      const r1 = (resVal >> 4) & 0xf;
+      const r2 = (resVal >> 8) & 0xf;
+      const r3 = (resVal >> 12) & 0xf;
+      if (r0 !== board[i0] || r1 !== board[i1] || r2 !== board[i2] || r3 !== board[i3]) {
+        if (!changed) {
+          b = board.slice();
+          changed = true;
+        }
+        b[i0] = r0;
+        b[i1] = r1;
+        b[i2] = r2;
+        b[i3] = r3;
+      }
     }
-    return { board:b, changed };
+    return { board: changed ? b : board, changed };
   }
 
-  // ── Snake weight matrices — all 8 symmetries ─────────────────────────────
-  // All 8 = 4 corners × 2 orientations (horizontal-snake / vertical-snake).
-  // Taking MAX over all 8 prevents the solver from being stuck in one corner.
-  const SNAKE_WEIGHTS = [
-    [15,14,13,12,  8, 9,10,11,  7, 6, 5, 4,  0, 1, 2, 3], // TL horizontal
-    [12,13,14,15, 11,10, 9, 8,  4, 5, 6, 7,  3, 2, 1, 0], // TR horizontal
-    [ 0, 1, 2, 3,  7, 6, 5, 4,  8, 9,10,11, 15,14,13,12], // BL horizontal
-    [ 3, 2, 1, 0,  4, 5, 6, 7, 11,10, 9, 8, 12,13,14,15], // BR horizontal
-    [15, 8, 7, 0, 14, 9, 6, 1, 13,10, 5, 2, 12,11, 4, 3], // TL vertical
-    [ 0, 7, 8,15,  1, 6, 9,14,  2, 5,10,13,  3, 4,11,12], // TR vertical
-    [12,11, 4, 3, 13,10, 5, 2, 14, 9, 6, 1, 15, 8, 7, 0], // BL vertical
-    [ 3, 4,11,12,  2, 5,10,13,  1, 6, 9,14,  0, 7, 8,15], // BR vertical
-  ];
-
-  /** Max snake score across all 8 symmetries.
-   *  CRITICAL: Uses DEC[board[i]] (actual tile value) NOT encoded log2 value.
-   *  Reason: with encoded values, merging two 1024s (enc 10) into 2048 (enc 11)
-   *  scores 11×w < 10×w1 + 10×w2 for many positions — the solver would REFUSE merges!
-   *  With actual values: 2048×w > 1024×w1 + 1024×w2 always when w > w1+w2 approximately,
-   *  making high-value merges correctly beneficial. Weight 0.008 keeps same absolute
-   *  scale: 2048×15×0.008 ≈ 246 pts (same as old 11×15×1.5 = 247). */
-  function snakeScore(board) {
-    let best = -Infinity;
-    for (const w of SNAKE_WEIGHTS) {
-      let s = 0;
-      for (let i = 0; i < 16; i++) s += DEC[board[i]] * w[i];  // actual tile value!
-      if (s > best) best = s;
+  function countEmpty(board) {
+    let empty = 0;
+    for (let i = 0; i < 16; i++) {
+      if (board[i] === 0) empty++;
     }
+    return empty;
+  }
+
+  function countDistinctTiles(board) {
+    let bitset = 0;
+    for (let i = 0; i < 16; ++i) {
+      bitset |= 1 << board[i];
+    }
+    bitset >>= 1;
+
+    let count = 0;
+    while (bitset > 0) {
+      bitset &= bitset - 1;
+      count++;
+    }
+    return count;
+  }
+
+  const CPROB_THRESH_BASE = 0.0001;
+  const CACHE_DEPTH_LIMIT = 15;
+
+  function scoreTileChooseNode(state, board, cprob) {
+    if (cprob < CPROB_THRESH_BASE || state.curDepth >= state.depthLimit) {
+      state.maxDepth = Math.max(state.curDepth, state.maxDepth);
+      return scoreHeurBoard(board);
+    }
+
+    let key;
+    if (state.curDepth < CACHE_DEPTH_LIMIT) {
+      key = String.fromCharCode(...board);
+      const entry = state.transTable.get(key);
+      if (entry !== undefined) {
+        if (entry.depth <= state.curDepth) {
+          state.cacheHits++;
+          return entry.heuristic;
+        }
+      }
+    }
+
+    const numOpen = countEmpty(board);
+    const nextCProb = cprob / numOpen;
+
+    let res = 0.0;
+    for (let i = 0; i < 16; i++) {
+      if (board[i] === 0) {
+        board[i] = 1;
+        res += scoreMoveNode(state, board, nextCProb * 0.9) * 0.9;
+        board[i] = 2;
+        res += scoreMoveNode(state, board, nextCProb * 0.1) * 0.1;
+        board[i] = 0;
+      }
+    }
+    res = res / numOpen;
+
+    if (state.curDepth < CACHE_DEPTH_LIMIT) {
+      state.transTable.set(key, { depth: state.curDepth, heuristic: res });
+    }
+
+    return res;
+  }
+
+  function scoreMoveNode(state, board, cprob) {
+    let best = 0.0;
+    state.curDepth++;
+    for (let move = 0; move < 4; ++move) {
+      const dir = DIRS[move];
+      const { board: newboard, changed } = applyMove(board, dir);
+      state.movesEvaled++;
+
+      if (changed) {
+        best = Math.max(best, scoreTileChooseNode(state, newboard, cprob));
+      }
+    }
+    state.curDepth--;
     return best;
   }
 
-  /** Empty cell count — #1 survival metric. Raw count, weight 27. */
-  function emptyCount(board) {
-    let n = 0;
-    for (let i = 0; i < 16; i++) if (board[i] === 0) n++;
-    return n;
-  }
-
-  /** Monotonicity in log2 space — penalise non-monotonic rows/cols. */
-  function monotonicity(board) {
-    let penalty = 0;
-    for (let r = 0; r < 4; r++) {
-      let inc = 0, dec = 0;
-      for (let c = 0; c < 3; c++) {
-        const a = board[r*4+c], b = board[r*4+c+1];
-        if (a > b) dec += a - b; else inc += b - a;
-      }
-      penalty -= Math.min(inc, dec);
-    }
-    for (let c = 0; c < 4; c++) {
-      let inc = 0, dec = 0;
-      for (let r = 0; r < 3; r++) {
-        const a = board[r*4+c], b = board[(r+1)*4+c];
-        if (a > b) dec += a - b; else inc += b - a;
-      }
-      penalty -= Math.min(inc, dec);
-    }
-    return penalty;
-  }
-
-  /** Smoothness — penalise large jumps between adjacent tiles (log2 space). */
-  function smoothness(board) {
-    let s = 0;
-    for (let r = 0; r < 4; r++)
-      for (let c = 0; c < 3; c++)
-        if (board[r*4+c] && board[r*4+c+1])
-          s -= Math.abs(board[r*4+c] - board[r*4+c+1]);
-    for (let r = 0; r < 3; r++)
-      for (let c = 0; c < 4; c++)
-        if (board[r*4+c] && board[(r+1)*4+c])
-          s -= Math.abs(board[r*4+c] - board[(r+1)*4+c]);
-    return s;
-  }
-
-  /** Merge potential — adjacent equal tiles = free future merges. */
-  function mergePotential(board) {
-    let m = 0;
-    for (let r = 0; r < 4; r++)
-      for (let c = 0; c < 3; c++)
-        if (board[r*4+c] && board[r*4+c] === board[r*4+c+1]) m += board[r*4+c];
-    for (let r = 0; r < 3; r++)
-      for (let c = 0; c < 4; c++)
-        if (board[r*4+c] && board[r*4+c] === board[(r+1)*4+c]) m += board[r*4+c];
-    return m;
-  }
-
-  /** Corner bonus — max tile in ANY of the 4 corners.
-   *  Multiplier 12 (up from 6) makes corner positioning strongly preferred
-   *  over saving 1-2 empty cells. This was the key bug: 2048 landed off-corner. */
-  function cornerBonus(board) {
-    const max = Math.max(...board);
-    if (!max) return 0;
-    return (board[0]===max||board[3]===max||board[12]===max||board[15]===max) ? max*12 : 0;
-  }
-
-  /** Adjacency bonus — 2nd-largest tile adjacent to largest = merge setup.
-   *  Near multiplier raised 4→6: being adjacent to the max is much more valuable. */
-  function adjacencyBonus(board) {
-    let max = 0, second = 0;
-    for (let i = 0; i < 16; i++) {
-      if (board[i] > max)         { second = max; max = board[i]; }
-      else if (board[i] > second) { second = board[i]; }
-    }
-    if (!second) return 0;
-    let maxIdx = -1, secIdx = -1;
-    for (let i = 0; i < 16; i++) {
-      if (board[i] === max    && maxIdx < 0) maxIdx = i;
-      else if (board[i] === second && secIdx < 0) secIdx  = i;
-    }
-    const dist = Math.abs((maxIdx>>2)-(secIdx>>2)) + Math.abs((maxIdx&3)-(secIdx&3));
-    if (dist === 1) return second * 6;   // adjacent — raised from 4
-    if (dist === 2) return second * 2;   // nearby  — raised from 1
-    return 0;
-  }
-
-  /** Returns true when no valid move exists (game over). */
-  function isTerminal(board) {
-    for (const dir of DIRS) if (applyMove(board, dir).changed) return false;
-    return true;
-  }
-
-  /** Full 7-component evaluation — tuned for 80k-100k target. */
-  function heuristic(board) {
-    if (isTerminal(board)) return -1e9;
-    return (
-      snakeScore(board)     * 0.008 +  // uses actual tile values; 2048×15×0.008≈246pts
-      emptyCount(board)     * 30    +  // most important survival metric
-      monotonicity(board)   * 1.5   +
-      smoothness(board)     * 0.4   +
-      mergePotential(board) * 3.0   +  // encoded values fine here (setup detection)
-      cornerBonus(board)            +  // self-weighted × 12
-      adjacencyBonus(board)            // self-weighted × 6
-    );
-  }
-
-  // ── Adaptive depth ──────────────────────────────────────────────────────────
-  function adaptDepth(board, base) {
-    const e = emptyCount(board);
-    if (e <= 2)  return base + 2;
-    if (e <= 4)  return base + 1;
-    if (e >= 12) return Math.max(3, base - 1);
-    return base;
-  }
-
-  // ── Adjacency-weighted chance node sampler ──────────────────────────────────
-  function sampleCells(board, maxN) {
-    const empties = [];
-    for (let i = 0; i < 16; i++) {
-      if (board[i] !== 0) continue;
-      const r = i >> 2, c = i & 3;
-      let adj = 0;
-      if (r > 0 && board[i-4] > adj) adj = board[i-4];
-      if (r < 3 && board[i+4] > adj) adj = board[i+4];
-      if (c > 0 && board[i-1] > adj) adj = board[i-1];
-      if (c < 3 && board[i+1] > adj) adj = board[i+1];
-      empties.push({ i, adj });
-    }
-    if (empties.length <= maxN) return empties.map(e => e.i);
-    empties.sort((a, b) => b.adj - a.adj);
-    return empties.slice(0, maxN).map(e => e.i);
-  }
-
-  // ── Transposition table ─────────────────────────────────────────────────────
-  let TRANS_TABLE = new Map();
-
-  // ── Expectimax ──────────────────────────────────────────────────────────────
-  function expectimax(board, depth, isMax) {
-    if (depth === 0) {
-      const key = board.join('|');
-      let v = TRANS_TABLE.get(key);
-      if (v === undefined) { v = heuristic(board); TRANS_TABLE.set(key, v); }
-      return v;
-    }
-    if (isMax) {
-      let best = -Infinity;
-      for (const dir of DIRS) {
-        const { board: nb, changed } = applyMove(board, dir);
-        if (!changed) continue;
-        const s = expectimax(nb, depth - 1, false);
-        if (s > best) best = s;
-      }
-      return best === -Infinity ? heuristic(board) : best;
-    } else {
-      const cells = sampleCells(board, CFG.MAX_CHANCE_SAMPLES);
-      if (!cells.length) return heuristic(board);
-      let total = 0;
-      for (const idx of cells) {
-        const b2 = board.slice(); b2[idx] = 1;
-        total += 0.9 * expectimax(b2, depth - 1, true);
-        const b4 = board.slice(); b4[idx] = 2;
-        total += 0.1 * expectimax(b4, depth - 1, true);
-      }
-      return total / cells.length;
-    }
-  }
-
   function pickBestMove(board) {
-    const depth = adaptDepth(board, CFG.BASE_DEPTH);
-    TRANS_TABLE = new Map();   // fresh cache per decision
+    const depthLimit = Math.max(3, countDistinctTiles(board) - 2);
 
-    let bestDir = -1, bestScore = -Infinity;
+    const state = {
+      transTable: new Map(),
+      maxDepth: 0,
+      curDepth: 0,
+      cacheHits: 0,
+      movesEvaled: 0,
+      depthLimit: depthLimit
+    };
+
+    let bestDir = -1;
+    let bestScore = -Infinity;
     const scores = {};
-    // Move ordering: Up→Left→Down→Right (finds good candidates early)
-    for (const dir of DIRS) {
-      const { board: nb, changed } = applyMove(board, dir);
-      if (!changed) { scores[DIR_NAME[dir]] = '⛔ blocked'; continue; }
-      const s = expectimax(nb, depth - 1, false);
-      scores[DIR_NAME[dir]] = Math.round(s).toLocaleString();
-      if (s > bestScore) { bestScore = s; bestDir = dir; }
+
+    const startTime = performance.now();
+
+    for (let move = 0; move < 4; move++) {
+      const dir = DIRS[move];
+      const { board: newboard, changed } = applyMove(board, dir);
+      if (!changed) {
+        scores[DIR_NAME[dir]] = '⛔ blocked';
+        continue;
+      }
+
+      const res = scoreTileChooseNode(state, newboard, 1.0) + 1e-6;
+      scores[DIR_NAME[dir]] = Math.round(res).toLocaleString();
+
+      if (res > bestScore) {
+        bestScore = res;
+        bestDir = dir;
+      }
     }
+
+    const elapsed = (performance.now() - startTime) / 1000.0;
+    console.log(`[2048] AI Move selection: best = ${DIR_NAME[bestDir]}, score = ${bestScore.toFixed(2)}, eval'd ${state.movesEvaled} nodes (${state.cacheHits} cache hits, cache size ${state.transTable.size}) in ${elapsed.toFixed(3)}s (maxdepth=${state.maxDepth})`);
+
     if (bestDir === -1) {
-      for (const dir of DIRS) if (applyMove(board, dir).changed) { bestDir = dir; break; }
+      for (const dir of DIRS) {
+        if (applyMove(board, dir).changed) {
+          bestDir = dir;
+          break;
+        }
+      }
     }
     if (bestDir === -1) bestDir = KEY.DOWN;
-    return { dir: bestDir, score: bestScore, scores, depth };
+
+    return { dir: bestDir, score: bestScore, scores, depth: depthLimit };
   }
 
   // ── Cycle fallback ─────────────────────────────────────────────────────
@@ -897,9 +920,9 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
         console.log('   ➡ If this persists, reload the page (do not just reload extension).');
       }
 
-      console.log(`   Algorithm: Expectimax depth-${CFG.BASE_DEPTH} (adaptive: +1 at ≤4 empty, +2 at ≤2 empty)`);
-      console.log('   Heuristics: snake(8-sym)×1.2 + empty×27 + mono×1.5 + smooth×0.4 + merge×2.5 + corner + adjacency');
-      console.log(`   Sampling:  adjacency-weighted chance nodes (max ${CFG.MAX_CHANCE_SAMPLES} cells)`);
+      console.log(`   Algorithm: Expectimax with dynamic depth (countDistinctTiles - 2)`);
+      console.log('   Heuristics: Precomputed HEUR_SCORE_TABLE (monotonicity, sum, empty, merges) via 8 lookup operations');
+      console.log(`   Sampling:  Expectimax with threshold pruning (cprob < 0.0001)`);
       console.log(`   Interval:  ${CFG.MOVE_INTERVAL_MS}ms`);
       console.log(`   Controls:  window.__2048SolverStop()  |  window.__2048SolverStart()`);
       console.log(`   Diagnose:  window.__2048Status()  ← run this any time to check board reading`);
