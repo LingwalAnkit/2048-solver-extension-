@@ -335,12 +335,13 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
 
   // ── Config ─────────────────────────────────────────────────────────────
   const CFG = {
-    MOVE_INTERVAL_MS : 300,  // faster speed as requested
-    EXPECTIMAX_DEPTH : 4,
-    STARTUP_DELAY_MS : 2000,  // give the game + interceptor time to boot
-    KEYUP_DELAY_MS   : 60,
-    DIAG_INTERVAL    : 20,    // print full diagnostics every N moves
-    DIAG_VERBOSE     : false,  // set to true to output huge message details
+    MOVE_INTERVAL_MS  : 250,   // slightly faster now depth is reliable
+    BASE_DEPTH        : 6,     // depth 6 → research-brief 80k+ tier
+    STARTUP_DELAY_MS  : 2000,
+    KEYUP_DELAY_MS    : 50,
+    DIAG_INTERVAL     : 25,
+    DIAG_VERBOSE      : false,
+    MAX_CHANCE_SAMPLES: 6,     // reduced from 8 to keep depth-6 under ~150ms/move
   };
 
   // ── Key codes ──────────────────────────────────────────────────────────
@@ -404,6 +405,33 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     return board.some(v => v > 0) ? board : null;
   }
 
+  // ── Strategy C: localStorage (play2048.co guaranteed source) ───────────────
+  // play2048.co uses a Svelte persisted store that writes to localStorage["gameState"]
+  // after every move. Board format: { board: [[null|{id,value,position:{x,y}},..],..] }
+  function readBoardLocalStorage() {
+    try {
+      const raw = localStorage.getItem('gameState');
+      if (!raw) return null;
+      const state = JSON.parse(raw);
+      const grid = state && (state.board || state.grid);
+      if (!Array.isArray(grid) || grid.length === 0) return null;
+
+      const board = new Array(16).fill(0);
+      let found = false;
+      grid.forEach((row, ri) => {
+        if (!Array.isArray(row)) return;
+        row.forEach((tile, ci) => {
+          if (!tile || typeof tile.value !== 'number' || tile.value <= 0) return;
+          const x = (tile.position && typeof tile.position.x === 'number') ? tile.position.x : ci;
+          const y = (tile.position && typeof tile.position.y === 'number') ? tile.position.y : ri;
+          const idx = y * 4 + x;
+          if (idx >= 0 && idx < 16) { board[idx] = tile.value; found = true; }
+        });
+      });
+      return found ? board : null;
+    } catch (_) { return null; }
+  }
+
   let boardStrategy = null;
   function readBoard() {
     let board;
@@ -413,16 +441,24 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
       if (board) return { board, strategy: 'worker' };
       boardStrategy = null;
     }
+    if (boardStrategy === 'localStorage') {
+      board = readBoardLocalStorage();
+      if (board) return { board, strategy: 'localStorage' };
+      boardStrategy = null;
+    }
     if (boardStrategy === 'dom') {
       board = readBoardDOM();
       if (board) return { board, strategy: 'dom' };
       boardStrategy = null;
     }
 
+    // Probe all strategies in priority order
     board = readBoardWorker();
-    if (board) { boardStrategy = 'worker'; return { board, strategy: 'worker' }; }
+    if (board) { boardStrategy = 'worker';       return { board, strategy: 'worker' }; }
+    board = readBoardLocalStorage();
+    if (board) { boardStrategy = 'localStorage'; return { board, strategy: 'localStorage' }; }
     board = readBoardDOM();
-    if (board) { boardStrategy = 'dom';    return { board, strategy: 'dom' }; }
+    if (board) { boardStrategy = 'dom';          return { board, strategy: 'dom' }; }
 
     return { board: null, strategy: 'cycle' };
   }
@@ -479,129 +515,191 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     return { board:b, changed };
   }
 
-  // ── Heuristics ─────────────────────────────────────────────────────────
-  function computeSmoothness(board) {
-    let smoothness = 0;
-    for (let row = 0; row < 4; row++) {
-      for (let col = 0; col < 4; col++) {
-        const index = row * 4 + col;
-        const value = board[index];
-        if (value > 0) {
-          // Look to the right
-          for (let nextCol = col + 1; nextCol < 4; nextCol++) {
-            const nextIndex = row * 4 + nextCol;
-            const nextValue = board[nextIndex];
-            if (nextValue > 0) {
-              smoothness -= Math.abs(value - nextValue);
-              break;
-            }
-          }
-          // Look down
-          for (let nextRow = row + 1; nextRow < 4; nextRow++) {
-            const nextIndex = nextRow * 4 + col;
-            const nextValue = board[nextIndex];
-            if (nextValue > 0) {
-              smoothness -= Math.abs(value - nextValue);
-              break;
-            }
-          }
-        }
-      }
+  // ── Snake weight matrices — all 8 symmetries ─────────────────────────────
+  // All 8 = 4 corners × 2 orientations (horizontal-snake / vertical-snake).
+  // Taking MAX over all 8 prevents the solver from being stuck in one corner.
+  const SNAKE_WEIGHTS = [
+    [15,14,13,12,  8, 9,10,11,  7, 6, 5, 4,  0, 1, 2, 3], // TL horizontal
+    [12,13,14,15, 11,10, 9, 8,  4, 5, 6, 7,  3, 2, 1, 0], // TR horizontal
+    [ 0, 1, 2, 3,  7, 6, 5, 4,  8, 9,10,11, 15,14,13,12], // BL horizontal
+    [ 3, 2, 1, 0,  4, 5, 6, 7, 11,10, 9, 8, 12,13,14,15], // BR horizontal
+    [15, 8, 7, 0, 14, 9, 6, 1, 13,10, 5, 2, 12,11, 4, 3], // TL vertical
+    [ 0, 7, 8,15,  1, 6, 9,14,  2, 5,10,13,  3, 4,11,12], // TR vertical
+    [12,11, 4, 3, 13,10, 5, 2, 14, 9, 6, 1, 15, 8, 7, 0], // BL vertical
+    [ 3, 4,11,12,  2, 5,10,13,  1, 6, 9,14,  0, 7, 8,15], // BR vertical
+  ];
+
+  /** Max snake score across all 8 symmetries.
+   *  CRITICAL: Uses DEC[board[i]] (actual tile value) NOT encoded log2 value.
+   *  Reason: with encoded values, merging two 1024s (enc 10) into 2048 (enc 11)
+   *  scores 11×w < 10×w1 + 10×w2 for many positions — the solver would REFUSE merges!
+   *  With actual values: 2048×w > 1024×w1 + 1024×w2 always when w > w1+w2 approximately,
+   *  making high-value merges correctly beneficial. Weight 0.008 keeps same absolute
+   *  scale: 2048×15×0.008 ≈ 246 pts (same as old 11×15×1.5 = 247). */
+  function snakeScore(board) {
+    let best = -Infinity;
+    for (const w of SNAKE_WEIGHTS) {
+      let s = 0;
+      for (let i = 0; i < 16; i++) s += DEC[board[i]] * w[i];  // actual tile value!
+      if (s > best) best = s;
     }
-    return smoothness;
+    return best;
   }
 
-  function computeMonotonicity(board) {
-    const totals = [0, 0, 0, 0];
-
-    // Up/down direction (vertical columns)
-    for (let col = 0; col < 4; col++) {
-      let current = 0;
-      let next = current + 1;
-      while (next < 4) {
-        while (next < 4 && board[next * 4 + col] === 0) {
-          next++;
-        }
-        if (next >= 4) {
-          next--;
-        }
-        const currentValue = board[current * 4 + col];
-        const nextValue = board[next * 4 + col];
-        if (currentValue > nextValue) {
-          totals[0] += nextValue - currentValue;
-        } else if (nextValue > currentValue) {
-          totals[1] += currentValue - nextValue;
-        }
-        current = next;
-        next++;
-      }
-    }
-
-    // Left/right direction (horizontal rows)
-    for (let row = 0; row < 4; row++) {
-      let current = 0;
-      let next = current + 1;
-      while (next < 4) {
-        while (next < 4 && board[row * 4 + next] === 0) {
-          next++;
-        }
-        if (next >= 4) {
-          next--;
-        }
-        const currentValue = board[row * 4 + current];
-        const nextValue = board[row * 4 + next];
-        if (currentValue > nextValue) {
-          totals[2] += nextValue - currentValue;
-        } else if (nextValue > currentValue) {
-          totals[3] += currentValue - nextValue;
-        }
-        current = next;
-        next++;
-      }
-    }
-
-    return Math.max(totals[0], totals[1]) + Math.max(totals[2], totals[3]);
+  /** Empty cell count — #1 survival metric. Raw count, weight 27. */
+  function emptyCount(board) {
+    let n = 0;
+    for (let i = 0; i < 16; i++) if (board[i] === 0) n++;
+    return n;
   }
 
-  function heuristic(board) {
-    let emptyCells = 0;
+  /** Monotonicity in log2 space — penalise non-monotonic rows/cols. */
+  function monotonicity(board) {
+    let penalty = 0;
+    for (let r = 0; r < 4; r++) {
+      let inc = 0, dec = 0;
+      for (let c = 0; c < 3; c++) {
+        const a = board[r*4+c], b = board[r*4+c+1];
+        if (a > b) dec += a - b; else inc += b - a;
+      }
+      penalty -= Math.min(inc, dec);
+    }
+    for (let c = 0; c < 4; c++) {
+      let inc = 0, dec = 0;
+      for (let r = 0; r < 3; r++) {
+        const a = board[r*4+c], b = board[(r+1)*4+c];
+        if (a > b) dec += a - b; else inc += b - a;
+      }
+      penalty -= Math.min(inc, dec);
+    }
+    return penalty;
+  }
+
+  /** Smoothness — penalise large jumps between adjacent tiles (log2 space). */
+  function smoothness(board) {
+    let s = 0;
+    for (let r = 0; r < 4; r++)
+      for (let c = 0; c < 3; c++)
+        if (board[r*4+c] && board[r*4+c+1])
+          s -= Math.abs(board[r*4+c] - board[r*4+c+1]);
+    for (let r = 0; r < 3; r++)
+      for (let c = 0; c < 4; c++)
+        if (board[r*4+c] && board[(r+1)*4+c])
+          s -= Math.abs(board[r*4+c] - board[(r+1)*4+c]);
+    return s;
+  }
+
+  /** Merge potential — adjacent equal tiles = free future merges. */
+  function mergePotential(board) {
+    let m = 0;
+    for (let r = 0; r < 4; r++)
+      for (let c = 0; c < 3; c++)
+        if (board[r*4+c] && board[r*4+c] === board[r*4+c+1]) m += board[r*4+c];
+    for (let r = 0; r < 3; r++)
+      for (let c = 0; c < 4; c++)
+        if (board[r*4+c] && board[r*4+c] === board[(r+1)*4+c]) m += board[r*4+c];
+    return m;
+  }
+
+  /** Corner bonus — max tile in ANY of the 4 corners.
+   *  Multiplier 12 (up from 6) makes corner positioning strongly preferred
+   *  over saving 1-2 empty cells. This was the key bug: 2048 landed off-corner. */
+  function cornerBonus(board) {
+    const max = Math.max(...board);
+    if (!max) return 0;
+    return (board[0]===max||board[3]===max||board[12]===max||board[15]===max) ? max*12 : 0;
+  }
+
+  /** Adjacency bonus — 2nd-largest tile adjacent to largest = merge setup.
+   *  Near multiplier raised 4→6: being adjacent to the max is much more valuable. */
+  function adjacencyBonus(board) {
+    let max = 0, second = 0;
     for (let i = 0; i < 16; i++) {
-      if (board[i] === 0) emptyCells++;
+      if (board[i] > max)         { second = max; max = board[i]; }
+      else if (board[i] > second) { second = board[i]; }
     }
-
-    const smoothness = computeSmoothness(board);
-    const monotonicity = computeMonotonicity(board);
-    const maxValue = Math.max(...board);
-    const emptyCellsLog = emptyCells > 0 ? Math.log(emptyCells) : -8.0;
-
-    const smoothWeight = 0.1;
-    const mono2Weight  = 1.0;
-    const emptyWeight  = 2.7;
-    const maxWeight    = 1.0;
-
-    return smoothness * smoothWeight +
-           monotonicity * mono2Weight +
-           emptyCellsLog * emptyWeight +
-           maxValue * maxWeight;
+    if (!second) return 0;
+    let maxIdx = -1, secIdx = -1;
+    for (let i = 0; i < 16; i++) {
+      if (board[i] === max    && maxIdx < 0) maxIdx = i;
+      else if (board[i] === second && secIdx < 0) secIdx  = i;
+    }
+    const dist = Math.abs((maxIdx>>2)-(secIdx>>2)) + Math.abs((maxIdx&3)-(secIdx&3));
+    if (dist === 1) return second * 6;   // adjacent — raised from 4
+    if (dist === 2) return second * 2;   // nearby  — raised from 1
+    return 0;
   }
 
-  // ── Expectimax ─────────────────────────────────────────────────────────
+  /** Returns true when no valid move exists (game over). */
+  function isTerminal(board) {
+    for (const dir of DIRS) if (applyMove(board, dir).changed) return false;
+    return true;
+  }
+
+  /** Full 7-component evaluation — tuned for 80k-100k target. */
+  function heuristic(board) {
+    if (isTerminal(board)) return -1e9;
+    return (
+      snakeScore(board)     * 0.008 +  // uses actual tile values; 2048×15×0.008≈246pts
+      emptyCount(board)     * 30    +  // most important survival metric
+      monotonicity(board)   * 1.5   +
+      smoothness(board)     * 0.4   +
+      mergePotential(board) * 3.0   +  // encoded values fine here (setup detection)
+      cornerBonus(board)            +  // self-weighted × 12
+      adjacencyBonus(board)            // self-weighted × 6
+    );
+  }
+
+  // ── Adaptive depth ──────────────────────────────────────────────────────────
+  function adaptDepth(board, base) {
+    const e = emptyCount(board);
+    if (e <= 2)  return base + 2;
+    if (e <= 4)  return base + 1;
+    if (e >= 12) return Math.max(3, base - 1);
+    return base;
+  }
+
+  // ── Adjacency-weighted chance node sampler ──────────────────────────────────
+  function sampleCells(board, maxN) {
+    const empties = [];
+    for (let i = 0; i < 16; i++) {
+      if (board[i] !== 0) continue;
+      const r = i >> 2, c = i & 3;
+      let adj = 0;
+      if (r > 0 && board[i-4] > adj) adj = board[i-4];
+      if (r < 3 && board[i+4] > adj) adj = board[i+4];
+      if (c > 0 && board[i-1] > adj) adj = board[i-1];
+      if (c < 3 && board[i+1] > adj) adj = board[i+1];
+      empties.push({ i, adj });
+    }
+    if (empties.length <= maxN) return empties.map(e => e.i);
+    empties.sort((a, b) => b.adj - a.adj);
+    return empties.slice(0, maxN).map(e => e.i);
+  }
+
+  // ── Transposition table ─────────────────────────────────────────────────────
+  let TRANS_TABLE = new Map();
+
+  // ── Expectimax ──────────────────────────────────────────────────────────────
   function expectimax(board, depth, isMax) {
-    if (depth === 0) return heuristic(board);
+    if (depth === 0) {
+      const key = board.join('|');
+      let v = TRANS_TABLE.get(key);
+      if (v === undefined) { v = heuristic(board); TRANS_TABLE.set(key, v); }
+      return v;
+    }
     if (isMax) {
       let best = -Infinity;
       for (const dir of DIRS) {
-        const {board: nb, changed} = applyMove(board, dir);
+        const { board: nb, changed } = applyMove(board, dir);
         if (!changed) continue;
         const s = expectimax(nb, depth - 1, false);
         if (s > best) best = s;
       }
-      return best === -Infinity ? 0 : best;
+      return best === -Infinity ? heuristic(board) : best;
     } else {
-      const empties = [];
-      for (let i = 0; i < 16; i++) if (board[i] === 0) empties.push(i);
-      if (!empties.length) return heuristic(board);
-      const cells = empties.length > 5 ? empties.slice(0, 5) : empties;
+      const cells = sampleCells(board, CFG.MAX_CHANCE_SAMPLES);
+      if (!cells.length) return heuristic(board);
       let total = 0;
       for (const idx of cells) {
         const b2 = board.slice(); b2[idx] = 1;
@@ -614,23 +712,23 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
   }
 
   function pickBestMove(board) {
-    const empty = board.filter(v => v === 0).length;
-    let depth = 4; // Base depth
-    if (empty <= 2) {
-      depth = 6;
-    } else if (empty <= 4) {
-      depth = 5;
-    }
+    const depth = adaptDepth(board, CFG.BASE_DEPTH);
+    TRANS_TABLE = new Map();   // fresh cache per decision
 
-    let bestDir = KEY.DOWN, bestScore = -Infinity;
+    let bestDir = -1, bestScore = -Infinity;
     const scores = {};
+    // Move ordering: Up→Left→Down→Right (finds good candidates early)
     for (const dir of DIRS) {
-      const {board: nb, changed} = applyMove(board, dir);
+      const { board: nb, changed } = applyMove(board, dir);
       if (!changed) { scores[DIR_NAME[dir]] = '⛔ blocked'; continue; }
       const s = expectimax(nb, depth - 1, false);
       scores[DIR_NAME[dir]] = Math.round(s).toLocaleString();
       if (s > bestScore) { bestScore = s; bestDir = dir; }
     }
+    if (bestDir === -1) {
+      for (const dir of DIRS) if (applyMove(board, dir).changed) { bestDir = dir; break; }
+    }
+    if (bestDir === -1) bestDir = KEY.DOWN;
     return { dir: bestDir, score: bestScore, scores, depth };
   }
 
@@ -799,11 +897,12 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
         console.log('   ➡ If this persists, reload the page (do not just reload extension).');
       }
 
-      console.log(`   Algorithm: Expectimax depth-${CFG.EXPECTIMAX_DEPTH}`);
-      console.log('   Heuristics: empty(log-space) + smoothness + monotonicity + maxValue');
+      console.log(`   Algorithm: Expectimax depth-${CFG.BASE_DEPTH} (adaptive: +1 at ≤4 empty, +2 at ≤2 empty)`);
+      console.log('   Heuristics: snake(8-sym)×1.2 + empty×27 + mono×1.5 + smooth×0.4 + merge×2.5 + corner + adjacency');
+      console.log(`   Sampling:  adjacency-weighted chance nodes (max ${CFG.MAX_CHANCE_SAMPLES} cells)`);
       console.log(`   Interval:  ${CFG.MOVE_INTERVAL_MS}ms`);
       console.log(`   Controls:  window.__2048SolverStop()  |  window.__2048SolverStart()`);
-      console.log(`   Debug:     window.__2048State  (live board from worker)`);
+      console.log(`   Diagnose:  window.__2048Status()  ← run this any time to check board reading`);
       console.log('%c━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'color:#475569');
 
       printDiagnostics();
@@ -823,12 +922,37 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
 
   window.__2048SolverStop  = stopSolver;
   window.__2048SolverStart = startSolver;
+
+  /** Run window.__2048Status() in the browser console to instantly diagnose board reading. */
+  window.__2048Status = function() {
+    console.group('%c[2048] 🩺 STATUS', 'color:#38bdf8; font-weight:bold');
+    console.log('Move count:   ', moveCount);
+    console.log('Current mode: ', boardStrategy ?? 'not started');
+
+    const ls = readBoardLocalStorage();
+    console.log('localStorage board:', ls ? ls.join(',') : '❌ null — gameState not yet saved (make 1 manual move)');
+
+    const wk = readBoardWorker();
+    console.log('Worker board:     ', wk ? wk.join(',') : '❌ null');
+
+    const dom = readBoardDOM();
+    console.log('DOM board:        ', dom ? dom.join(',') : '❌ null');
+
+    const st = window.__2048State;
+    console.log('Worker messages:  ', st ? `in=${st.incomingCount} out=${st.outgoingCount}` : '❌ interceptor not running');
+    if (st) {
+      console.log('Event types seen: ', JSON.stringify(st.eventNames));
+      console.log('Last 3 messages:  ', st.lastIncoming.slice(-3));
+    }
+    console.groupEnd();
+  };
+
   window.addEventListener('message', e => {
     if (!e.data?.__2048Solver) return;
     if (e.data.action==='stop')  stopSolver();
     if (e.data.action==='start') startSolver();
   });
 
-  console.log('%c🚀 [2048] solver.js loaded in page world', 'color:#818cf8; font-weight:bold');
+  console.log('%c🚀 [2048] solver v3.0 loaded — run window.__2048Status() to check board reading', 'color:#818cf8; font-weight:bold');
   startSolver();
 })();
