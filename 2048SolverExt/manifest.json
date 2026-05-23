@@ -1,8 +1,8 @@
 {
-  "name": "Easter-2048-Solver",
+  "name": "2048-Solver-Extension",
   "version": "0.0.3",
   "manifest_version": 3,
-  "description": "Making easter 2048 puzzle un-fun by solving it with Expectimax AI.",
+  "description": "Automate 2048 puzzle by solving it with Expectimax algorithm.(https://github.com/2048-Solver-Extension)",
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",

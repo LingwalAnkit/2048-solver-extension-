@@ -411,7 +411,7 @@ The bitwise operations themselves are not significantly faster in JS than array 
 | 64-bit bitboard + lookup tables         | 7–8                       | 300,000–500,000    |
 | Bitboard + parallel workers (4 threads) | 8–9                       | 500,000+           |
 
-### Implementation Checklist for Agent
+### Implementation Checklist
 
 To upgrade the current solver to full bitboard:
 
