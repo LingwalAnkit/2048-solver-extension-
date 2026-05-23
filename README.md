@@ -1,4 +1,5 @@
 # 2048 Solver — Chrome Extension
+# No AI just maths 
 
 A Chrome extension that automatically plays and solves the 2048 puzzle on [2048game.com](https://2048game.com), consistently achieving **200,000+ average score** using a pure algorithm — no AI, no machine learning, just math.
 
