@@ -324,7 +324,7 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
 })();
 
 // ──────────────────────────────────────────────────────────────────────
-//  PART 2: SOLVER
+//  PART 2: SOLVER  (v4.0 — 5-bit encoding, Flight Data Recorder)
 // ──────────────────────────────────────────────────────────────────────
 (function () {
   if (window.__2048SolverRunning) {
@@ -335,13 +335,11 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
 
   // ── Config ─────────────────────────────────────────────────────────────
   const CFG = {
-    MOVE_INTERVAL_MS  : 250,   // slightly faster now depth is reliable
-    BASE_DEPTH        : 6,     // depth 6 → research-brief 80k+ tier
+    MOVE_INTERVAL_MS  : 150,   // fast early game, self-throttles in late game
     STARTUP_DELAY_MS  : 2000,
     KEYUP_DELAY_MS    : 50,
     DIAG_INTERVAL     : 25,
     DIAG_VERBOSE      : false,
-    MAX_CHANCE_SAMPLES: 6,     // reduced from 8 to keep depth-6 under ~150ms/move
   };
 
   // ── Key codes ──────────────────────────────────────────────────────────
@@ -405,9 +403,6 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     return board.some(v => v > 0) ? board : null;
   }
 
-  // ── Strategy C: localStorage (play2048.co guaranteed source) ───────────────
-  // play2048.co uses a Svelte persisted store that writes to localStorage["gameState"]
-  // after every move. Board format: { board: [[null|{id,value,position:{x,y}},..],..] }
   function readBoardLocalStorage() {
     try {
       const raw = localStorage.getItem('gameState');
@@ -452,7 +447,6 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
       boardStrategy = null;
     }
 
-    // Probe all strategies in priority order
     board = readBoardWorker();
     if (board) { boardStrategy = 'worker';       return { board, strategy: 'worker' }; }
     board = readBoardLocalStorage();
@@ -463,130 +457,135 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     return { board: null, strategy: 'cycle' };
   }
 
-  // ── Board encoding ─────────────────────────────────────────────────────
+  // ── Board encoding (5-bit: supports tiles up to 131072) ───────────────
   const ENC = { 0:0,2:1,4:2,8:3,16:4,32:5,64:6,128:7,256:8,512:9,
-                1024:10,2048:11,4096:12,8192:13,16384:14,32768:15 };
-  const DEC = [0,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768];
+                1024:10,2048:11,4096:12,8192:13,16384:14,32768:15,65536:16,131072:17 };
+  const DEC = [0,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072];
 
   function encodeBoard(raw) {
-    return raw.map(v => ENC[v] ?? ENC[Math.pow(2, Math.round(Math.log2(v || 1)))] ?? 0);
+    return raw.map(v => ENC[v] ?? (v > 0 ? Math.min(17, Math.round(Math.log2(v))) : 0));
   }
 
-  // ── Precomputed Tables (nneonneo style) ──────────────────────────────────
-  const ROW_LEFT_TABLE = new Uint16Array(65536);
-  const HEUR_SCORE_TABLE = new Float32Array(65536);
-  const SCORE_TABLE = new Float32Array(65536);
+  // ── Precomputed Tables (nneonneo style, 5-bit encoding) ───────────────
+  // 5 bits per cell × 4 cells = 20 bits → 2^20 = 1,048,576 entries
+  const TABLE_SIZE = 1048576;
+  const ROW_LEFT_TABLE  = new Uint32Array(TABLE_SIZE);
+  const HEUR_SCORE_TABLE = new Float32Array(TABLE_SIZE);
+  const SCORE_TABLE     = new Float32Array(TABLE_SIZE);
 
   function initTables() {
-    const SCORE_LOST_PENALTY = 200000.0;
-    const SCORE_MONOTONICITY_POWER = 4.0;
+    const SCORE_LOST_PENALTY        = 200000.0;
+    const SCORE_MONOTONICITY_POWER  = 4.0;
     const SCORE_MONOTONICITY_WEIGHT = 47.0;
-    const SCORE_SUM_POWER = 3.5;
-    const SCORE_SUM_WEIGHT = 11.0;
-    const SCORE_MERGES_WEIGHT = 700.0;
-    const SCORE_EMPTY_WEIGHT = 270.0;
+    const SCORE_SUM_POWER           = 3.5;
+    const SCORE_SUM_WEIGHT          = 11.0;
+    const SCORE_MERGES_WEIGHT       = 700.0;
+    const SCORE_EMPTY_WEIGHT        = 270.0;
+    const MAX_RANK = 17; // 2^17 = 131,072
 
-    for (let row = 0; row < 65536; ++row) {
-      const line = [
-        row & 0xf,
-        (row >> 4) & 0xf,
-        (row >> 8) & 0xf,
-        (row >> 12) & 0xf
-      ];
+    for (let a = 0; a <= MAX_RANK; a++) {
+      for (let b = 0; b <= MAX_RANK; b++) {
+        for (let c = 0; c <= MAX_RANK; c++) {
+          for (let d = 0; d <= MAX_RANK; d++) {
+            const row = a | (b << 5) | (c << 10) | (d << 15);
+            const line = [a, b, c, d];
 
-      // Score Table
-      let score = 0.0;
-      for (let i = 0; i < 4; ++i) {
-        const rank = line[i];
-        if (rank >= 2) {
-          score += (rank - 1) * (1 << rank);
-        }
-      }
-      SCORE_TABLE[row] = score;
+            // Score Table
+            let score = 0.0;
+            for (let i = 0; i < 4; ++i) {
+              const rank = line[i];
+              if (rank >= 2) {
+                score += (rank - 1) * (1 << rank);
+              }
+            }
+            SCORE_TABLE[row] = score;
 
-      // Heuristic Score Table
-      let sum = 0;
-      let empty = 0;
-      let merges = 0;
-      let prev = 0;
-      let counter = 0;
+            // Heuristic Score Table
+            let sum = 0;
+            let empty = 0;
+            let merges = 0;
+            let prev = 0;
+            let counter = 0;
 
-      for (let i = 0; i < 4; ++i) {
-        const rank = line[i];
-        sum += Math.pow(rank, SCORE_SUM_POWER);
-        if (rank === 0) {
-          empty++;
-        } else {
-          if (prev === rank) {
-            counter++;
-          } else if (counter > 0) {
-            merges += 1 + counter;
-            counter = 0;
+            for (let i = 0; i < 4; ++i) {
+              const rank = line[i];
+              sum += Math.pow(rank, SCORE_SUM_POWER);
+              if (rank === 0) {
+                empty++;
+              } else {
+                if (prev === rank) {
+                  counter++;
+                } else if (counter > 0) {
+                  merges += 1 + counter;
+                  counter = 0;
+                }
+                prev = rank;
+              }
+            }
+            if (counter > 0) {
+              merges += 1 + counter;
+            }
+
+            let monotonicity_left = 0;
+            let monotonicity_right = 0;
+            for (let i = 1; i < 4; ++i) {
+              if (line[i-1] > line[i]) {
+                monotonicity_left += Math.pow(line[i-1], SCORE_MONOTONICITY_POWER) - Math.pow(line[i], SCORE_MONOTONICITY_POWER);
+              } else {
+                monotonicity_right += Math.pow(line[i], SCORE_MONOTONICITY_POWER) - Math.pow(line[i-1], SCORE_MONOTONICITY_POWER);
+              }
+            }
+
+            HEUR_SCORE_TABLE[row] = SCORE_LOST_PENALTY +
+              SCORE_EMPTY_WEIGHT * empty +
+              SCORE_MERGES_WEIGHT * merges -
+              SCORE_MONOTONICITY_WEIGHT * Math.min(monotonicity_left, monotonicity_right) -
+              SCORE_SUM_WEIGHT * sum;
+
+            // execute a move to the left
+            for (let i = 0; i < 3; ++i) {
+              let j;
+              for (j = i + 1; j < 4; ++j) {
+                if (line[j] !== 0) break;
+              }
+              if (j === 4) break;
+
+              if (line[i] === 0) {
+                line[i] = line[j];
+                line[j] = 0;
+                i--;
+              } else if (line[i] === line[j]) {
+                if (line[i] !== MAX_RANK) {
+                  line[i]++;
+                }
+                line[j] = 0;
+              }
+            }
+
+            ROW_LEFT_TABLE[row] = line[0] | (line[1] << 5) | (line[2] << 10) | (line[3] << 15);
           }
-          prev = rank;
         }
       }
-      if (counter > 0) {
-        merges += 1 + counter;
-      }
-
-      let monotonicity_left = 0;
-      let monotonicity_right = 0;
-      for (let i = 1; i < 4; ++i) {
-        if (line[i-1] > line[i]) {
-          monotonicity_left += Math.pow(line[i-1], SCORE_MONOTONICITY_POWER) - Math.pow(line[i], SCORE_MONOTONICITY_POWER);
-        } else {
-          monotonicity_right += Math.pow(line[i], SCORE_MONOTONICITY_POWER) - Math.pow(line[i-1], SCORE_MONOTONICITY_POWER);
-        }
-      }
-
-      HEUR_SCORE_TABLE[row] = SCORE_LOST_PENALTY +
-        SCORE_EMPTY_WEIGHT * empty +
-        SCORE_MERGES_WEIGHT * merges -
-        SCORE_MONOTONICITY_WEIGHT * Math.min(monotonicity_left, monotonicity_right) -
-        SCORE_SUM_WEIGHT * sum;
-
-      // execute a move to the left
-      for (let i = 0; i < 3; ++i) {
-        let j;
-        for (j = i + 1; j < 4; ++j) {
-          if (line[j] !== 0) break;
-        }
-        if (j === 4) break;
-
-        if (line[i] === 0) {
-          line[i] = line[j];
-          line[j] = 0;
-          i--;
-        } else if (line[i] === line[j]) {
-          if (line[i] !== 0xf) {
-            line[i]++;
-          }
-          line[j] = 0;
-        }
-      }
-
-      ROW_LEFT_TABLE[row] = line[0] | (line[1] << 4) | (line[2] << 8) | (line[3] << 12);
     }
   }
 
   function scoreHeurBoard(board) {
-    return HEUR_SCORE_TABLE[board[0]  | (board[1]  << 4) | (board[2]  << 8) | (board[3]  << 12)] +
-           HEUR_SCORE_TABLE[board[4]  | (board[5]  << 4) | (board[6]  << 8) | (board[7]  << 12)] +
-           HEUR_SCORE_TABLE[board[8]  | (board[9]  << 4) | (board[10] << 8) | (board[11] << 12)] +
-           HEUR_SCORE_TABLE[board[12] | (board[13] << 4) | (board[14] << 8) | (board[15] << 12)] +
-           HEUR_SCORE_TABLE[board[0]  | (board[4]  << 4) | (board[8]  << 8) | (board[12] << 12)] +
-           HEUR_SCORE_TABLE[board[1]  | (board[5]  << 4) | (board[9]  << 8) | (board[13] << 12)] +
-           HEUR_SCORE_TABLE[board[2]  | (board[6]  << 4) | (board[10] << 8) | (board[14] << 12)] +
-           HEUR_SCORE_TABLE[board[3]  | (board[7]  << 4) | (board[11] << 8) | (board[15] << 12)];
+    return HEUR_SCORE_TABLE[board[0]  | (board[1]  << 5) | (board[2]  << 10) | (board[3]  << 15)] +
+           HEUR_SCORE_TABLE[board[4]  | (board[5]  << 5) | (board[6]  << 10) | (board[7]  << 15)] +
+           HEUR_SCORE_TABLE[board[8]  | (board[9]  << 5) | (board[10] << 10) | (board[11] << 15)] +
+           HEUR_SCORE_TABLE[board[12] | (board[13] << 5) | (board[14] << 10) | (board[15] << 15)] +
+           HEUR_SCORE_TABLE[board[0]  | (board[4]  << 5) | (board[8]  << 10) | (board[12] << 15)] +
+           HEUR_SCORE_TABLE[board[1]  | (board[5]  << 5) | (board[9]  << 10) | (board[13] << 15)] +
+           HEUR_SCORE_TABLE[board[2]  | (board[6]  << 5) | (board[10] << 10) | (board[14] << 15)] +
+           HEUR_SCORE_TABLE[board[3]  | (board[7]  << 5) | (board[11] << 10) | (board[15] << 15)];
   }
 
   function buildCache() {
-    console.log('%c📐 [2048] Initializing nneonneo precomputed tables...', 'color:#818cf8');
+    console.log('%c📐 [2048] Initializing 5-bit precomputed tables (1M entries)...', 'color:#818cf8');
     const startTime = performance.now();
     initTables();
     const elapsed = performance.now() - startTime;
-    console.log(`%c📐 [2048] Tables ready in ${elapsed.toFixed(2)}ms`, 'color:#818cf8');
+    console.log(`%c📐 [2048] Tables ready in ${elapsed.toFixed(0)}ms (${(TABLE_SIZE).toLocaleString()} entries)`, 'color:#818cf8');
   }
 
   const ORDER = {
@@ -602,12 +601,12 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     const order = ORDER[dir];
     for (let i = 0; i < 4; i++) {
       const [i0, i1, i2, i3] = order[i];
-      const key = board[i0] | (board[i1] << 4) | (board[i2] << 8) | (board[i3] << 12);
+      const key = board[i0] | (board[i1] << 5) | (board[i2] << 10) | (board[i3] << 15);
       const resVal = ROW_LEFT_TABLE[key];
-      const r0 = resVal & 0xf;
-      const r1 = (resVal >> 4) & 0xf;
-      const r2 = (resVal >> 8) & 0xf;
-      const r3 = (resVal >> 12) & 0xf;
+      const r0 = resVal & 0x1f;
+      const r1 = (resVal >> 5) & 0x1f;
+      const r2 = (resVal >> 10) & 0x1f;
+      const r3 = (resVal >> 15) & 0x1f;
       if (r0 !== board[i0] || r1 !== board[i1] || r2 !== board[i2] || r3 !== board[i3]) {
         if (!changed) {
           b = board.slice();
@@ -739,8 +738,9 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
       }
     }
 
-    const elapsed = (performance.now() - startTime) / 1000.0;
-    console.log(`[2048] AI Move selection: best = ${DIR_NAME[bestDir]}, score = ${bestScore.toFixed(2)}, eval'd ${state.movesEvaled} nodes (${state.cacheHits} cache hits, cache size ${state.transTable.size}) in ${elapsed.toFixed(3)}s (maxdepth=${state.maxDepth})`);
+    const elapsedMs = performance.now() - startTime;
+    const elapsed = elapsedMs / 1000.0;
+    console.log(`[2048] AI Move: best = ${DIR_NAME[bestDir]}, eval'd ${state.movesEvaled} nodes (${state.cacheHits} cache hits, cache ${state.transTable.size}) in ${elapsed.toFixed(3)}s (depth=${state.maxDepth})`);
 
     if (bestDir === -1) {
       for (const dir of DIRS) {
@@ -752,7 +752,7 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     }
     if (bestDir === -1) bestDir = KEY.DOWN;
 
-    return { dir: bestDir, score: bestScore, scores, depth: depthLimit };
+    return { dir: bestDir, score: bestScore, scores, depth: depthLimit, calcTimeMs: elapsedMs };
   }
 
   // ── Cycle fallback ─────────────────────────────────────────────────────
@@ -767,11 +767,78 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
       const row=[];
       for (let c=0;c<4;c++) {
         const v=DEC[board[r*4+c]]||0;
-        row.push(String(v===0?'·':v).padStart(5));
+        row.push(String(v===0?'·':v).padStart(7));
       }
       out+='  '+row.join(' ')+'\n';
     }
     return out;
+  }
+
+  // ── Game Over Detection ────────────────────────────────────────────────
+  function detectGameOver(board) {
+    for (let move = 0; move < 4; ++move) {
+      const { changed } = applyMove(board, DIRS[move]);
+      if (changed) return false;
+    }
+    return true;
+  }
+
+  function detectGameOverDOM() {
+    return document.querySelector('.game-over') !== null;
+  }
+
+  // ── Flight Data Recorder ──────────────────────────────────────────────
+  const gameHistory = [];
+  let sessionStartTime = null;
+
+  function downloadHistory(summary) {
+    try {
+      const finalScore = summary.finalScore || 0;
+      const date = new Date().toISOString().slice(0, 10);
+      const filename = `2048_session_${finalScore}_${date}.json`;
+      const blob = new Blob([JSON.stringify(summary, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      console.log(`%c📥 [2048] Game history downloaded as: ${filename}`, 'color:#4ade80; font-weight:bold');
+    } catch (err) {
+      console.error('[2048] Failed to download history:', err);
+    }
+  }
+
+  function onGameOver(board, rawBoard) {
+    stopSolver();
+    const domScore = readScoreDOM();
+    const maxTile = DEC[Math.max(...board)] || 0;
+
+    const summary = {
+      finalScore: domScore ?? window.__2048State?.score ?? 0,
+      totalMoves: moveCount,
+      maxTileReached: maxTile,
+      sessionDurationMs: sessionStartTime ? Date.now() - sessionStartTime : 0,
+      date: new Date().toISOString(),
+      moves: gameHistory
+    };
+
+    window.__2048GameHistory = summary;
+
+    console.log('%c━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'color:#f87171');
+    console.log('%c💀  2048 SOLVER  —  GAME OVER', 'color:#f87171; font-size:16px; font-weight:bold');
+    console.log('%c━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'color:#f87171');
+    console.log(`   Final Score:    ${(summary.finalScore).toLocaleString()}`);
+    console.log(`   Max Tile:       ${maxTile.toLocaleString()}`);
+    console.log(`   Total Moves:    ${moveCount}`);
+    console.log(`   Duration:       ${(summary.sessionDurationMs / 1000).toFixed(1)}s`);
+    console.log('%c━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'color:#f87171');
+    console.log('%c📋 Full game history: window.__2048GameHistory', 'color:#38bdf8');
+    console.log('%c📋 Copy with: copy(JSON.stringify(window.__2048GameHistory))', 'color:#38bdf8');
+
+    downloadHistory(summary);
   }
 
   // ── Diagnostic dump ────────────────────────────────────────────────────
@@ -843,7 +910,13 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     if (useAI) {
       const board  = encodeBoard(rawBoard);
       const empty  = board.filter(v=>v===0).length;
-      const maxTile = DEC[Math.max(...board)];
+      const maxTile = DEC[Math.max(...board)] || 0;
+
+      // Game over check (algorithmic)
+      if (detectGameOver(board)) {
+        onGameOver(board, rawBoard);
+        return;
+      }
 
       if (lastEncBoard && board.every((v,i)=>v===lastEncBoard[i])) {
         stuckCount++;
@@ -856,19 +929,37 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
       }
       lastEncBoard = board.slice();
 
-      let depthUsed = CFG.EXPECTIMAX_DEPTH;
+      let depthUsed = 0;
+      let calcTimeMs = 0;
       if (!dir) {
         const res = pickBestMove(board);
         dir       = res.dir;
         scoreInfo = res.scores;
         depthUsed = res.depth;
+        calcTimeMs = res.calcTimeMs;
       }
 
       const domScore = readScoreDOM();
       const st = window.__2048State;
 
+      // Record move in Flight Data Recorder
+      gameHistory.push({
+        step: moveCount,
+        timestamp: Date.now(),
+        board: rawBoard.slice(),
+        encodedBoard: board.slice(),
+        maxTile,
+        empty,
+        move: DIR_NAME[dir],
+        scores: scoreInfo,
+        depth: depthUsed,
+        calcTimeMs: Math.round(calcTimeMs * 100) / 100,
+        gameScore: domScore ?? st?.score ?? 0,
+        strategy
+      });
+
       console.groupCollapsed(
-        `%c[2048] #${moveCount}  ${DIR_NAME[dir].padEnd(10)}  🏆 ${String(maxTile).padStart(5)}  🟩 ${empty}/16  📡 ${strategy}`,
+        `%c[2048] #${moveCount}  ${DIR_NAME[dir].padEnd(10)}  🏆 ${String(maxTile).padStart(6)}  🟩 ${empty}/16  📡 ${strategy}`,
         'color:#4ade80; font-weight:bold; font-family:monospace'
       );
       console.log('%cBoard state:\n' + renderBoard(board), 'color:#94a3b8; font-family:monospace');
@@ -877,7 +968,7 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
         console.table(scoreInfo);
       }
       console.log(
-        `%cScore: ${domScore ?? st?.score ?? '?'}  |  Interval: ${CFG.MOVE_INTERVAL_MS}ms  |  Depth: ${depthUsed}`,
+        `%cScore: ${domScore ?? st?.score ?? '?'}  |  Interval: ${CFG.MOVE_INTERVAL_MS}ms  |  Depth: ${depthUsed}  |  Calc: ${calcTimeMs.toFixed(1)}ms`,
         'color:#64748b'
       );
       console.groupEnd();
@@ -906,10 +997,17 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     setTimeout(() => {
       buildCache();
 
+      // Reset flight data recorder
+      gameHistory.length = 0;
+      sessionStartTime = Date.now();
+      moveCount = 0;
+      stuckCount = 0;
+      lastEncBoard = null;
+
       const { board: testBoard, strategy } = readBoard();
 
       console.log('%c━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'color:#475569');
-      console.log('%c🎮  2048 SOLVER  —  STARTED', 'color:#f59e0b; font-size:16px; font-weight:bold');
+      console.log('%c🎮  2048 SOLVER v4.0  —  STARTED', 'color:#f59e0b; font-size:16px; font-weight:bold');
       console.log('%c━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'color:#475569');
 
       if (testBoard) {
@@ -920,10 +1018,13 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
         console.log('   ➡ If this persists, reload the page (do not just reload extension).');
       }
 
+      console.log(`   Encoding:  5-bit (supports tiles up to 131,072)`);
       console.log(`   Algorithm: Expectimax with dynamic depth (countDistinctTiles - 2)`);
-      console.log('   Heuristics: Precomputed HEUR_SCORE_TABLE (monotonicity, sum, empty, merges) via 8 lookup operations');
-      console.log(`   Sampling:  Expectimax with threshold pruning (cprob < 0.0001)`);
+      console.log('   Heuristics: Precomputed HEUR_SCORE_TABLE via 8 lookup operations');
+      console.log(`   Pruning:   Threshold cprob < 0.0001`);
+      console.log(`   Tables:    ${TABLE_SIZE.toLocaleString()} entries per table`);
       console.log(`   Interval:  ${CFG.MOVE_INTERVAL_MS}ms`);
+      console.log(`   Recorder:  ✅ Flight Data Recorder active (auto-downloads on game over)`);
       console.log(`   Controls:  window.__2048SolverStop()  |  window.__2048SolverStart()`);
       console.log(`   Diagnose:  window.__2048Status()  ← run this any time to check board reading`);
       console.log('%c━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'color:#475569');
@@ -951,6 +1052,7 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     console.group('%c[2048] 🩺 STATUS', 'color:#38bdf8; font-weight:bold');
     console.log('Move count:   ', moveCount);
     console.log('Current mode: ', boardStrategy ?? 'not started');
+    console.log('History size: ', gameHistory.length, 'moves recorded');
 
     const ls = readBoardLocalStorage();
     console.log('localStorage board:', ls ? ls.join(',') : '❌ null — gameState not yet saved (make 1 manual move)');
@@ -976,6 +1078,6 @@ console.log('[2048-Solver] Combined content.js running in MAIN world on', window
     if (e.data.action==='start') startSolver();
   });
 
-  console.log('%c🚀 [2048] solver v3.0 loaded — run window.__2048Status() to check board reading', 'color:#818cf8; font-weight:bold');
+  console.log('%c🚀 [2048] solver v4.0 loaded (5-bit, Flight Data Recorder) — run window.__2048Status() to check board reading', 'color:#818cf8; font-weight:bold');
   startSolver();
 })();
