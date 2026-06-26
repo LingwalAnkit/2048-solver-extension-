@@ -7,8 +7,8 @@ console.log('[2048-Solver] Background service worker started.');
 chrome.action.onClicked.addListener(function (tab) {
   console.log('[2048-Solver] Extension icon clicked, tab:', tab.id, tab.url);
 
-  if (!tab.url || !tab.url.includes('play2048.co')) {
-    console.warn('[2048-Solver] Not on play2048.co, ignoring click.');
+  if (!tab.url || (!tab.url.includes('play2048.co') && !tab.url.includes('2048verse.com'))) {
+    console.warn('[2048-Solver] Not on play2048.co or 2048verse.com, ignoring click.');
     return;
   }
 

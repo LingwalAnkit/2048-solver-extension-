@@ -37,11 +37,15 @@
 
   // ── Send keyboard event ────────────────────────────────────────────────
   function fireKey(type, code) {
-    document.dispatchEvent(new KeyboardEvent(type, {
+    const event = new KeyboardEvent(type, {
       bubbles: true, cancelable: true,
       key: KEY_STR[code], code: KEY_STR[code],
       keyCode: code, which: code,
-    }));
+    });
+    document.dispatchEvent(event);
+    if (typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(event);
+    }
   }
   function sendMove(dir) {
     fireKey('keydown', dir);
@@ -588,6 +592,7 @@
   let lastEncBoard = null;
 
   function tick() {
+    if (document.hidden) return;
     moveCount++;
     const { board: rawBoard, strategy } = readBoard();
     const useAI = rawBoard !== null;
@@ -608,8 +613,13 @@
       if (lastEncBoard && board.every((v,i)=>v===lastEncBoard[i])) {
         stuckCount++;
         if (stuckCount>=3) {
-          console.warn(`%c🔄 [2048] Stuck ${stuckCount} ticks — forcing UP`, 'color:#f87171');
-          dir = KEY.UP;
+          console.warn(`%c🔄 [2048] Stuck ${stuckCount} ticks — forcing safe unstuck move`, 'color:#f87171');
+          for (const d of [KEY.DOWN, KEY.RIGHT, KEY.LEFT, KEY.UP]) {
+            if (applyMove(board, d).changed) {
+              dir = d;
+              break;
+            }
+          }
         }
       } else {
         stuckCount = 0;

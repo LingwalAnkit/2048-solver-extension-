@@ -18,7 +18,8 @@
         "solver.js"
       ],
       "matches": [
-        "https://play2048.co/*"
+        "https://play2048.co/*",
+        "https://2048verse.com/*"
       ]
     }
   ],
@@ -30,12 +31,14 @@
     "activeTab"
   ],
   "host_permissions": [
-    "https://play2048.co/*"
+    "https://play2048.co/*",
+    "https://2048verse.com/*"
   ],
   "content_scripts": [
     {
       "matches": [
-        "https://play2048.co/*"
+        "https://play2048.co/*",
+        "https://2048verse.com/*"
       ],
       "js": [
         "content.js"
